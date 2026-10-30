@@ -15,7 +15,7 @@ It's a Rust reimplementation of the idea behind [vevc/nodejs-vless](https://gith
 | Private-network access | unrestricted | blocked by default (127/8, 10/8, 192.168/16, ::1, …) |
 | Timeouts | none | handshake + idle timeouts |
 
-v1 is **TCP only**. UDP, mux and XTLS flows are not supported.
+TCP for every protocol, plus **VLESS UDP** (command 2): datagrams are length-framed over the WebSocket, and every DNS query (port 53) goes to `[udp] dns_upstream` (default `1.1.1.1:53`), so remote DNS works even when the client names a private resolver. Other UDP goes to the requested public destination unless `dns_only = true`. Not supported yet: VLESS mux/XUDP (command 3, which Xray uses by default for non-DNS UDP), Shadowsocks UDP, SOCKS5 UDP ASSOCIATE, and XTLS flows.
 
 ## How it works
 

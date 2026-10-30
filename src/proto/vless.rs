@@ -1,10 +1,13 @@
-//! VLESS (version 0), TCP command only.
+//! VLESS (version 0): TCP (command 1) and UDP (command 2). Mux (command 3) is refused.
 //! Spec: https://xtls.github.io/development/protocols/vless.html
 //!
 //! Request:  ver(1) | uuid(16) | addon_len(1) | addons | cmd(1) | port(2 BE) | atyp(1) | addr
 //! Response: ver(1) | addon_len(1)=0
 //!
 //! atyp here is 1=IPv4, 2=domain, 3=IPv6 (different from SOCKS numbering).
+//!
+//! For UDP, every datagram after the header travels as `len(2 BE) | payload`
+//! in both directions, all to and from the one destination in the header.
 
 use super::Request;
 use crate::addr::Target;
@@ -16,6 +19,13 @@ pub const CMD_TCP: u8 = 0x01;
 pub const CMD_UDP: u8 = 0x02;
 pub const CMD_MUX: u8 = 0x03;
 
+/// What the client asked the relay to do with the destination.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Command {
+    Tcp,
+    Udp,
+}
+
 /// Parse a canonical UUID string into 16 bytes.
 pub fn parse_uuid(s: &str) -> Result<[u8; 16], ()> {
     let u = uuid::Uuid::parse_str(s).map_err(|_| ())?;
@@ -24,7 +34,7 @@ pub fn parse_uuid(s: &str) -> Result<[u8; 16], ()> {
 
 /// Read and authenticate a VLESS request header, then send the response
 /// header. On success the stream is positioned at the first payload byte.
-pub async fn handshake<S>(s: &mut S, expected: &[u8; 16]) -> std::io::Result<Request>
+pub async fn handshake<S>(s: &mut S, expected: &[u8; 16]) -> std::io::Result<(Request, Command)>
 where
     S: AsyncRead + AsyncWrite + Unpin,
 {
@@ -53,14 +63,9 @@ where
     }
 
     let cmd = s.read_u8().await?;
-    match cmd {
-        CMD_TCP => {}
-        CMD_UDP => {
-            return Err(Error::new(
-                ErrorKind::Unsupported,
-                "VLESS UDP is not supported (TCP only)",
-            ))
-        }
+    let command = match cmd {
+        CMD_TCP => Command::Tcp,
+        CMD_UDP => Command::Udp,
         CMD_MUX => {
             return Err(Error::new(
                 ErrorKind::Unsupported,
@@ -73,7 +78,7 @@ where
                 format!("unknown VLESS command {other}"),
             ))
         }
-    }
+    };
 
     let port = s.read_u16().await?;
     let atyp = s.read_u8().await?;
@@ -112,7 +117,7 @@ where
     s.write_all(&[version, 0]).await?;
     s.flush().await?;
 
-    Ok(Request { target, port })
+    Ok((Request { target, port }, command))
 }
 
 fn constant_time_eq(a: &[u8; 16], b: &[u8; 16]) -> bool {
@@ -146,7 +151,8 @@ mod tests {
         req.extend_from_slice(b"GET /");
         let (mut client, mut server) = tokio::io::duplex(1024);
         client.write_all(&req).await.unwrap();
-        let r = handshake(&mut server, &id).await.unwrap();
+        let (r, cmd) = handshake(&mut server, &id).await.unwrap();
+        assert_eq!(cmd, Command::Tcp);
         assert_eq!(r.port, 443);
         assert!(matches!(r.target, Target::Domain(ref d) if d == "example.com"));
         let mut resp = [0u8; 2];
@@ -168,9 +174,20 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn rejects_udp() {
+    async fn accepts_udp() {
         let id = parse_uuid("10889da6-14ea-4cc8-97fa-6c0bc410f121").unwrap();
-        let req = build(&id, CMD_UDP, "example.com", 53);
+        let req = build(&id, CMD_UDP, "dns.google", 53);
+        let (mut client, mut server) = tokio::io::duplex(1024);
+        client.write_all(&req).await.unwrap();
+        let (r, cmd) = handshake(&mut server, &id).await.unwrap();
+        assert_eq!(cmd, Command::Udp);
+        assert_eq!(r.port, 53);
+    }
+
+    #[tokio::test]
+    async fn rejects_mux() {
+        let id = parse_uuid("10889da6-14ea-4cc8-97fa-6c0bc410f121").unwrap();
+        let req = build(&id, CMD_MUX, "v1.mux.cool", 0);
         let (mut client, mut server) = tokio::io::duplex(1024);
         client.write_all(&req).await.unwrap();
         assert!(handshake(&mut server, &id).await.is_err());

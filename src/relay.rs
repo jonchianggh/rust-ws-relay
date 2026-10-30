@@ -20,16 +20,97 @@ pub async fn vless(
     let uuid = vless::parse_uuid(&cfg_v.uuid).map_err(|_| anyhow::anyhow!("bad uuid in config"))?;
     let mut stream = WsByteStream::new(ws);
 
-    let req = tokio::time::timeout(
+    let (req, cmd) = tokio::time::timeout(
         Duration::from_secs(cfg.handshake_timeout_secs),
         vless::handshake(&mut stream, &uuid),
     )
     .await
     .map_err(|_| anyhow::anyhow!("vless handshake timed out"))??;
 
+    if cmd == vless::Command::Udp {
+        return vless_udp(stream, req, cfg, peer).await;
+    }
+
     info!(peer = %peer, proto = "vless", target = %req.target, port = req.port, "connect");
     let upstream = addr::connect(&req.target, req.port, cfg.block_private_addresses).await?;
     pipe(stream, upstream, cfg.idle_timeout_secs).await
+}
+
+/// Relay one VLESS UDP session: `len(2 BE) | datagram` frames from the client
+/// go to a single destination, and each reply comes back framed the same way.
+/// DNS (port 53) is redirected to the configured upstream resolver.
+async fn vless_udp<S>(
+    stream: S,
+    req: crate::proto::Request,
+    cfg: &Config,
+    peer: SocketAddr,
+) -> anyhow::Result<()>
+where
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+{
+    let u = &cfg.udp;
+    if !u.enabled {
+        anyhow::bail!("vless udp is disabled");
+    }
+    let dest = if req.port == 53 {
+        u.dns_upstream
+    } else if u.dns_only {
+        anyhow::bail!("vless udp to port {} refused (dns_only)", req.port);
+    } else {
+        addr::resolve(&req.target, req.port, cfg.block_private_addresses).await?
+    };
+    info!(peer = %peer, proto = "vless-udp", target = %req.target, port = req.port, via = %dest, "connect");
+
+    let bind: SocketAddr = if dest.is_ipv4() {
+        "0.0.0.0:0".parse().unwrap()
+    } else {
+        "[::]:0".parse().unwrap()
+    };
+    let sock = tokio::net::UdpSocket::bind(bind).await?;
+    sock.connect(dest).await?;
+
+    let (mut sr, mut sw) = tokio::io::split(stream);
+    let act = Activity::new();
+
+    let up = async {
+        let mut buf = vec![0u8; 65535];
+        loop {
+            let len = match sr.read_u16().await {
+                Ok(n) => n as usize,
+                Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => break,
+                Err(e) => return Err(e),
+            };
+            sr.read_exact(&mut buf[..len]).await?;
+            act.touch();
+            // A send error (e.g. ICMP unreachable) drops this datagram only.
+            let _ = sock.send(&buf[..len]).await;
+        }
+        Ok::<(), std::io::Error>(())
+    };
+    let down = async {
+        let mut buf = vec![0u8; 65535 + 2];
+        loop {
+            let n = match sock.recv(&mut buf[2..]).await {
+                Ok(n) => n,
+                Err(e) if e.kind() == std::io::ErrorKind::ConnectionRefused => continue,
+                Err(e) => return Err(e),
+            };
+            act.touch();
+            buf[..2].copy_from_slice(&(n as u16).to_be_bytes());
+            sw.write_all(&buf[..n + 2]).await?;
+            sw.flush().await?;
+        }
+        #[allow(unreachable_code)]
+        Ok::<(), std::io::Error>(())
+    };
+    // The session ends when the client closes, either side errors, or it idles.
+    let r = tokio::select! {
+        r = up => r.map_err(Into::into),
+        r = down => r.map_err(Into::into),
+        _ = act.watchdog(u.idle_timeout_secs) => Ok(()),
+    };
+    sw.shutdown().await.ok();
+    r
 }
 
 pub async fn socks5(

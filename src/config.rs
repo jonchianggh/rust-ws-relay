@@ -47,6 +47,10 @@ pub struct Config {
     #[serde(default = "default_true")]
     pub block_private_addresses: bool,
 
+    /// UDP relaying (VLESS command 2).
+    #[serde(default)]
+    pub udp: UdpConfig,
+
     /// The cover website shown for every request that is not a valid proxy
     /// handshake on a configured path.
     #[serde(default)]
@@ -55,6 +59,46 @@ pub struct Config {
     /// Inbound protocol endpoints. Each binds to one secret WebSocket path.
     #[serde(default)]
     pub inbounds: Vec<Inbound>,
+}
+
+fn default_dns_upstream() -> SocketAddr {
+    "1.1.1.1:53".parse().unwrap()
+}
+
+fn default_udp_idle_timeout() -> u64 {
+    60
+}
+
+/// UDP settings. Datagrams to port 53 always go to `dns_upstream`, whatever
+/// resolver the client named, so a client pointing at 127.0.0.53 or a LAN
+/// resolver still gets answers without opening the private-address block.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct UdpConfig {
+    /// Accept VLESS UDP at all. When false, command 2 is refused as in v0.1.
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    /// Resolver that receives every DNS (port 53) datagram.
+    #[serde(default = "default_dns_upstream")]
+    pub dns_upstream: SocketAddr,
+    /// Only relay DNS. When false, other UDP (e.g. QUIC) goes to the requested
+    /// destination, subject to `block_private_addresses`.
+    #[serde(default)]
+    pub dns_only: bool,
+    /// Seconds a UDP session may sit with no datagrams before it is closed.
+    #[serde(default = "default_udp_idle_timeout")]
+    pub idle_timeout_secs: u64,
+}
+
+impl Default for UdpConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            dns_upstream: default_dns_upstream(),
+            dns_only: false,
+            idle_timeout_secs: default_udp_idle_timeout(),
+        }
+    }
 }
 
 /// How to answer ordinary web requests, so the server looks like a real site.

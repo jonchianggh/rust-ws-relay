@@ -64,6 +64,34 @@ fn is_blocked_v6(ip: &Ipv6Addr) -> bool {
     false
 }
 
+/// Resolve the target to the first socket address the block policy allows.
+/// Used for UDP, where there is no connect attempt to fall back across.
+pub async fn resolve(
+    target: &Target,
+    port: u16,
+    block_private: bool,
+) -> std::io::Result<std::net::SocketAddr> {
+    use std::io::{Error, ErrorKind};
+    let candidates: Vec<std::net::SocketAddr> = match target {
+        Target::Ip(ip) => vec![(*ip, port).into()],
+        Target::Domain(host) => tokio::net::lookup_host((host.as_str(), port))
+            .await?
+            .collect(),
+    };
+    let mut last_err = Error::new(ErrorKind::AddrNotAvailable, "no address resolved");
+    for sa in candidates {
+        if block_private && is_blocked_ip(&sa.ip()) {
+            last_err = Error::new(
+                ErrorKind::PermissionDenied,
+                format!("destination {target} resolved to blocked {}", sa.ip()),
+            );
+            continue;
+        }
+        return Ok(sa);
+    }
+    Err(last_err)
+}
+
 /// Open a TCP connection to the target, enforcing the private-address block
 /// after any DNS resolution.
 pub async fn connect(
@@ -135,5 +163,14 @@ mod tests {
             let ip: IpAddr = s.parse().unwrap();
             assert!(!is_blocked_ip(&ip), "{s} should be allowed");
         }
+    }
+
+    #[tokio::test]
+    async fn udp_resolve_honours_block() {
+        let lo = Target::Ip("127.0.0.1".parse().unwrap());
+        assert!(resolve(&lo, 123, true).await.is_err());
+        assert!(resolve(&lo, 123, false).await.is_ok());
+        let public = Target::Ip("1.1.1.1".parse().unwrap());
+        assert_eq!(resolve(&public, 53, true).await.unwrap().port(), 53);
     }
 }

@@ -13,6 +13,13 @@ handshake_timeout_secs = 10     # time allowed to send a protocol header
 idle_timeout_secs = 300         # close a connection with no traffic for this long
 block_private_addresses = true  # never proxy to 127/8, 10/8, 192.168/16, ::1, ...
 
+# UDP over VLESS (command 2). DNS datagrams always go to dns_upstream.
+[udp]
+enabled = true
+dns_upstream = "1.1.1.1:53"
+dns_only = false                # true = relay DNS only, refuse other UDP
+idle_timeout_secs = 60
+
 # The cover website for every request that isn't a valid proxy handshake.
 [decoy]
 mode = "builtin"                # a small, generic status page
