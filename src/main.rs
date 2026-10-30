@@ -10,6 +10,7 @@ mod decoy;
 mod proto;
 mod relay;
 mod server;
+mod uot;
 mod wsbytes;
 
 use clap::{Parser, Subcommand};

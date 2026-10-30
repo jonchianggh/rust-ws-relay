@@ -48,17 +48,7 @@ async fn vless_udp<S>(
 where
     S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
 {
-    let u = &cfg.udp;
-    if !u.enabled {
-        anyhow::bail!("vless udp is disabled");
-    }
-    let dest = if req.port == 53 {
-        u.dns_upstream
-    } else if u.dns_only {
-        anyhow::bail!("vless udp to port {} refused (dns_only)", req.port);
-    } else {
-        addr::resolve(&req.target, req.port, cfg.block_private_addresses).await?
-    };
+    let dest = crate::uot::udp_destination(&req.target, req.port, cfg).await?;
     info!(peer = %peer, proto = "vless-udp", target = %req.target, port = req.port, via = %dest, "connect");
 
     let bind: SocketAddr = if dest.is_ipv4() {
@@ -107,7 +97,7 @@ where
     let r = tokio::select! {
         r = up => r.map_err(Into::into),
         r = down => r.map_err(Into::into),
-        _ = act.watchdog(u.idle_timeout_secs) => Ok(()),
+        _ = act.watchdog(cfg.udp.idle_timeout_secs) => Ok(()),
     };
     sw.shutdown().await.ok();
     r
@@ -134,6 +124,11 @@ pub async fn socks5(
     )
     .await
     .map_err(|_| anyhow::anyhow!("socks5 handshake timed out"))??;
+
+    if let Some(version) = crate::uot::version_for(&req.target) {
+        socks5::reply(&mut stream, socks5::REP_SUCCESS).await?;
+        return crate::uot::serve(stream, version, cfg, peer).await;
+    }
 
     info!(peer = %peer, proto = "socks5", target = %req.target, port = req.port, "connect");
     match addr::connect(&req.target, req.port, cfg.block_private_addresses).await {
@@ -165,16 +160,56 @@ pub async fn shadowsocks(
     .map_err(|_| anyhow::anyhow!("shadowsocks handshake timed out"))??;
 
     let ss::Accepted {
-        mut reader,
-        mut writer,
+        reader,
+        writer,
         request,
         leftover,
     } = accepted;
+    // UDP-over-TCP: the "upstream" is an in-memory pipe to the UoT server.
+    if let Some(version) = crate::uot::version_for(&request.target) {
+        let (near, far) = tokio::io::duplex(128 * 1024);
+        let session = crate::uot::serve(far, version, cfg, peer);
+        let pipe = ss_pipe(
+            stream,
+            reader,
+            writer,
+            leftover,
+            near,
+            cfg.idle_timeout_secs,
+        );
+        // Whichever side finishes first ends the session.
+        return tokio::select! { r = session => r, r = pipe => r };
+    }
+
     info!(peer = %peer, proto = "shadowsocks", target = %request.target, port = request.port, "connect");
 
     let upstream =
         addr::connect(&request.target, request.port, cfg.block_private_addresses).await?;
-    let (mut up_r, mut up_w) = upstream.into_split();
+    ss_pipe(
+        stream,
+        reader,
+        writer,
+        leftover,
+        upstream,
+        cfg.idle_timeout_secs,
+    )
+    .await
+}
+
+/// Pipe a Shadowsocks session (decrypting client chunks, encrypting replies)
+/// to any byte-stream upstream: a TCP socket or the UoT pipe.
+async fn ss_pipe<U>(
+    stream: WsByteStream<Ws>,
+    mut reader: ss::crypto::SsReader,
+    mut writer: ss::crypto::SsWriter,
+    leftover: Vec<u8>,
+    upstream: U,
+    idle_secs: u64,
+) -> anyhow::Result<()>
+where
+    U: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+{
+    let (mut up_r, mut up_w) = tokio::io::split(upstream);
     if !leftover.is_empty() {
         up_w.write_all(&leftover).await?;
     }
@@ -212,7 +247,7 @@ pub async fn shadowsocks(
 
     tokio::select! {
         r = async { tokio::try_join!(c2u, u2c) } => { r?; Ok(()) }
-        _ = act.watchdog(cfg.idle_timeout_secs) => Err(anyhow::anyhow!("idle timeout")),
+        _ = act.watchdog(idle_secs) => Err(anyhow::anyhow!("idle timeout")),
     }
 }
 

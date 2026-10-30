@@ -15,7 +15,12 @@ It's a Rust reimplementation of the idea behind [vevc/nodejs-vless](https://gith
 | Private-network access | unrestricted | blocked by default (127/8, 10/8, 192.168/16, ::1, …) |
 | Timeouts | none | handshake + idle timeouts |
 
-TCP for every protocol, plus **VLESS UDP** (command 2): datagrams are length-framed over the WebSocket, and every DNS query (port 53) goes to `[udp] dns_upstream` (default `1.1.1.1:53`), so remote DNS works even when the client names a private resolver. Other UDP goes to the requested public destination unless `dns_only = true`. Not supported yet: VLESS mux/XUDP (command 3, which Xray uses by default for non-DNS UDP), Shadowsocks UDP, SOCKS5 UDP ASSOCIATE, and XTLS flows.
+TCP for every protocol, plus UDP:
+
+- **VLESS UDP** (command 2): datagrams are length-framed over the WebSocket.
+- **Shadowsocks and SOCKS5 UDP** via sing-box style **UDP-over-TCP** (UoT v1 and v2, the `sp.v2.udp-over-tcp.arpa` magic address). Turn on `udp_over_tcp` in a sing-box based client (sing-box, NekoBox, Hiddify, Karing...). Plain SS UDP and SOCKS5 UDP ASSOCIATE can't cross a WebSocket, and Xray's SS outbound doesn't send UoT over ws.
+
+Every DNS datagram (port 53) goes to `[udp] dns_upstream` (default `1.1.1.1:53`), so remote DNS works even when the client names a private resolver; replies are reported as coming from the server the client asked. Other UDP goes to the requested public destination unless `dns_only = true`. Not supported yet: VLESS mux/XUDP (command 3, which Xray uses by default for non-DNS UDP) and XTLS flows.
 
 ## How it works
 
