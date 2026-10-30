@@ -1,0 +1,21 @@
+[Unit]
+Description=rust-ws-relay (VLESS / Shadowsocks / SOCKS5 over WebSocket)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+ExecStart=/usr/local/bin/rust-ws-relay run --config /etc/rust-ws-relay/config.toml
+Restart=always
+RestartSec=2
+DynamicUser=yes
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+CapabilityBoundingSet=
+AmbientCapabilities=
+LimitNOFILE=65536
+Environment=RUST_LOG=info
+
+[Install]
+WantedBy=multi-user.target

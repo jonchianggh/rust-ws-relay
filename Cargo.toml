@@ -1,0 +1,58 @@
+[package]
+name = "rust-ws-relay"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.75"
+description = "Lightweight proxy relay that carries VLESS, Shadowsocks and SOCKS5 over a single WebSocket, hiding behind a natural decoy website. A Rust reimplementation of the idea behind vevc/nodejs-vless."
+license = "MIT"
+repository = "https://github.com/jonchianggh/rust-ws-relay"
+readme = "README.md"
+keywords = ["proxy", "vless", "shadowsocks", "socks5", "websocket"]
+categories = ["network-programming"]
+
+[[bin]]
+name = "rust-ws-relay"
+path = "src/main.rs"
+
+[dependencies]
+tokio = { version = "1.40", features = ["rt-multi-thread", "net", "io-util", "macros", "time", "signal", "sync"] }
+hyper = { version = "1.5", features = ["server", "http1", "client"] }
+hyper-util = { version = "0.1", features = ["tokio", "server", "client-legacy", "http1"] }
+http-body-util = "0.1"
+hyper-tungstenite = "0.15"
+futures-util = { version = "0.3", default-features = false, features = ["sink", "std"] }
+bytes = "1.7"
+pin-project-lite = "0.2"
+
+serde = { version = "1", features = ["derive"] }
+toml = "0.8"
+
+clap = { version = "4.5", features = ["derive"] }
+anyhow = "1"
+thiserror = "1"
+
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+rand = "0.8"
+hex = "0.4"
+base64 = "0.22"
+uuid = { version = "1.10", features = ["v4"] }
+
+# Shadowsocks crypto
+aes-gcm = "0.10"
+chacha20poly1305 = "0.10"
+hkdf = "0.12"
+sha1 = "0.10"
+md-5 = "0.10"
+blake3 = "1.5"
+
+[dev-dependencies]
+tokio = { version = "1.40", features = ["test-util"] }
+
+[profile.release]
+opt-level = "z"
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true
