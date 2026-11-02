@@ -10,6 +10,7 @@ mod decoy;
 mod proto;
 mod relay;
 mod server;
+mod sub;
 mod uot;
 mod wsbytes;
 
@@ -32,7 +33,7 @@ enum Command {
         #[arg(short, long, default_value = "config.toml")]
         config: PathBuf,
     },
-    /// Print client share links for a config's inbounds (never served over HTTP).
+    /// Print client share links and the subscription URL for a config.
     Links {
         #[arg(short, long, default_value = "config.toml")]
         config: PathBuf,
@@ -85,62 +86,27 @@ fn print_links(cfg: &Config, host_override: Option<String>) {
     let host = host_override
         .or_else(|| cfg.domain.clone())
         .unwrap_or_else(|| cfg.listen.to_string());
-    let (hostname, port) = match host.rsplit_once(':') {
-        Some((h, p)) => (h.to_string(), p.to_string()),
-        None => (host.clone(), "443".to_string()),
-    };
-
+    let ep = sub::Endpoint::parse(&host);
+    let name = cfg
+        .subscription
+        .as_ref()
+        .map(|s| s.name.clone())
+        .unwrap_or_else(|| "rust-ws-relay".to_string());
+    for link in sub::share_links(cfg, &ep, &name) {
+        println!("{link}");
+    }
     for ib in &cfg.inbounds {
-        let path_enc = urlencode(&ib.path);
-        match &ib.protocol {
-            Protocol::Vless(v) => {
-                println!(
-                    "vless://{uuid}@{hostname}:{port}?encryption=none&security=tls&sni={hostname}&fp=chrome&type=ws&host={hostname}&path={path}#rust-ws-relay-vless",
-                    uuid = v.uuid,
-                    path = path_enc,
-                );
-            }
-            Protocol::Shadowsocks(s) => {
-                // SIP002 with the v2ray-plugin websocket convention (mux off),
-                // understood by v2rayN, Shadowrocket, NekoBox, sing-box, etc.
-                use base64::Engine;
-                let userinfo = if s.method.starts_with("2022-") {
-                    // SIP022: 2022 keys go in plain (percent-encoded) form.
-                    format!("{}:{}", urlencode(&s.method), urlencode(&s.password))
-                } else {
-                    base64::engine::general_purpose::URL_SAFE_NO_PAD
-                        .encode(format!("{}:{}", s.method, s.password))
-                };
-                let plugin = format!(
-                    "v2ray-plugin;tls;mux=0;mode=websocket;host={hostname};path={}",
-                    ib.path
-                );
-                println!(
-                    "ss://{userinfo}@{hostname}:{port}/?plugin={plugin}#rust-ws-relay-ss",
-                    plugin = urlencode(&plugin),
-                );
-            }
-            Protocol::Socks5(_) => {
-                println!(
-                    "# socks5 inbound at wss://{hostname}:{port}{path} (configure a ws-capable SOCKS client)",
-                    path = ib.path,
-                );
-            }
+        if let Protocol::Socks5(_) = ib.protocol {
+            println!(
+                "# socks5 inbound at wss://{}:{}{} (configure a ws-capable SOCKS client)",
+                ep.host, ep.port, ib.path
+            );
         }
     }
-}
-
-fn urlencode(s: &str) -> String {
-    let mut out = String::new();
-    for b in s.bytes() {
-        match b {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
-                out.push(b as char)
-            }
-            _ => out.push_str(&format!("%{b:02X}")),
-        }
+    if let Some(s) = &cfg.subscription {
+        println!("# subscription: https://{}:{}{}", ep.host, ep.port, s.path);
+        println!("#   ?format=clash | singbox | base64 (auto-detected from the client otherwise)");
     }
-    out
 }
 
 fn init_tracing() {

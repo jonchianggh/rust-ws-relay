@@ -27,6 +27,12 @@ pub async fn vless(
     .await
     .map_err(|_| anyhow::anyhow!("vless handshake timed out"))??;
 
+    if cmd == vless::Command::Udp && crate::uot::is_packetaddr(&req.target) {
+        if !cfg.udp.enabled {
+            anyhow::bail!("udp is disabled");
+        }
+        return crate::uot::serve(stream, crate::uot::Mode::PacketAddr, cfg, peer).await;
+    }
     if cmd == vless::Command::Udp {
         return vless_udp(stream, req, cfg, peer).await;
     }
@@ -127,7 +133,7 @@ pub async fn socks5(
 
     if let Some(version) = crate::uot::version_for(&req.target) {
         socks5::reply(&mut stream, socks5::REP_SUCCESS).await?;
-        return crate::uot::serve(stream, version, cfg, peer).await;
+        return crate::uot::serve(stream, crate::uot::Mode::Uot(version), cfg, peer).await;
     }
 
     info!(peer = %peer, proto = "socks5", target = %req.target, port = req.port, "connect");
@@ -168,7 +174,7 @@ pub async fn shadowsocks(
     // UDP-over-TCP: the "upstream" is an in-memory pipe to the UoT server.
     if let Some(version) = crate::uot::version_for(&request.target) {
         let (near, far) = tokio::io::duplex(128 * 1024);
-        let session = crate::uot::serve(far, version, cfg, peer);
+        let session = crate::uot::serve(far, crate::uot::Mode::Uot(version), cfg, peer);
         let pipe = ss_pipe(
             stream,
             reader,

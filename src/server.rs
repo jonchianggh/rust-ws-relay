@@ -1,7 +1,7 @@
 //! HTTP front door: route WebSocket upgrades on secret paths into the proxy,
 //! and answer everything else with the decoy site.
 
-use crate::config::{Config, Inbound, Protocol};
+use crate::config::{Config, Inbound, Protocol, SubscriptionConfig};
 use crate::relay;
 use http_body_util::Full;
 use hyper::body::Bytes;
@@ -78,7 +78,84 @@ async fn handle(
         }
     }
 
+    if let Some(sub) = &cfg.subscription {
+        if path == sub.path && req.method() == hyper::Method::GET {
+            return Ok(subscription(&req, &cfg, sub, peer));
+        }
+    }
+
     Ok(crate::decoy::respond(&cfg.decoy, &req).await)
+}
+
+fn subscription(
+    req: &Request<hyper::body::Incoming>,
+    cfg: &Config,
+    sub: &SubscriptionConfig,
+    peer: std::net::SocketAddr,
+) -> Response<Full<Bytes>> {
+    use crate::sub::{self, Endpoint, Format};
+    let header = |name: hyper::header::HeaderName| {
+        req.headers()
+            .get(name)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("")
+            .to_string()
+    };
+    let ua = header(hyper::header::USER_AGENT);
+    // The configured public domain wins; otherwise trust the Host the
+    // client reached us by (TLS is terminated in front, so port 443).
+    let ep = match &cfg.domain {
+        Some(d) => Endpoint::parse(d),
+        None => Endpoint {
+            host: header(hyper::header::HOST)
+                .rsplit_once(':')
+                .map(|(h, _)| h.to_string())
+                .unwrap_or_else(|| header(hyper::header::HOST)),
+            port: 443,
+        },
+    };
+    let format = Format::detect(req.uri().query(), &ua);
+    info!(peer = %peer, ?format, ua = %ua, "subscription served");
+    let (body, ctype, ext) = match format {
+        Format::Clash => (
+            sub::clash(cfg, &ep, &sub.name),
+            "text/yaml; charset=utf-8",
+            "yaml",
+        ),
+        Format::SingBox => (
+            sub::singbox(cfg, &ep, &sub.name),
+            "application/json; charset=utf-8",
+            "json",
+        ),
+        Format::Base64 => (
+            sub::base64_list(cfg, &ep, &sub.name),
+            "text/plain; charset=utf-8",
+            "txt",
+        ),
+    };
+    Response::builder()
+        .header(hyper::header::CONTENT_TYPE, ctype)
+        .header(hyper::header::CACHE_CONTROL, "no-store")
+        .header(
+            "profile-update-interval",
+            sub.update_interval_hours.to_string(),
+        )
+        .header(
+            "profile-title",
+            format!("base64:{}", {
+                use base64::Engine;
+                base64::engine::general_purpose::STANDARD.encode(&sub.name)
+            }),
+        )
+        .header(
+            hyper::header::CONTENT_DISPOSITION,
+            format!(
+                "attachment; filename*=UTF-8''{}.{ext}",
+                sub::urlencode(&sub.name)
+            ),
+        )
+        .body(Full::new(Bytes::from(body)))
+        .unwrap()
 }
 
 type Ws = hyper_tungstenite::WebSocketStream<TokioIo<hyper::upgrade::Upgraded>>;

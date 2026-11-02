@@ -1,6 +1,6 @@
 [package]
 name = "rust-ws-relay"
-version = "0.3.0"
+version = "0.4.0"
 edition = "2021"
 rust-version = "1.75"
 description = "Lightweight proxy relay that carries VLESS, Shadowsocks and SOCKS5 over a single WebSocket, hiding behind a natural decoy website. A Rust reimplementation of the idea behind vevc/nodejs-vless."
@@ -26,6 +26,7 @@ pin-project-lite = "0.2"
 
 serde = { version = "1", features = ["derive"] }
 toml = "0.8"
+serde_json = "1"
 
 clap = { version = "4.5", features = ["derive"] }
 anyhow = "1"

@@ -55,6 +55,9 @@ if [ ! -f "$CONF" ]; then
 listen = "0.0.0.0:$PORT"
 $DOMAIN_LINE
 
+[subscription]
+path = "/sub-$(head -c 1024 /dev/urandom | tr -dc 'a-z0-9' | head -c 20)"
+
 [decoy]
 mode = "builtin"
 
@@ -107,7 +110,7 @@ if command -v instabox-port >/dev/null 2>&1; then
 fi
 
 echo
-echo "==> client links (keep these private):"
+echo "==> client links and subscription URL (keep these private):"
 if [ -n "${DOMAIN:-}" ]; then
   "$BIN" links --config "$CONF" --host "$DOMAIN:443"
 else

@@ -12,6 +12,11 @@
 //!   `0x00 + 4 bytes` (IPv4), `0x01 + 16 bytes` (IPv6) or `0x02 + len + name`.
 //!
 //! Reference: github.com/SagerNet/sing, common/uot.
+//!
+//! The same engine serves v2ray "packetaddr" on VLESS (used by mihomo and
+//! sing-box with `packet-encoding: packetaddr`): a VLESS UDP request to
+//! `sp.packet-addr.v2fly.arpa`, after which every VLESS frame, both ways, is
+//! `len(2 BE) | family(1 = IPv4, 2 = IPv6) | addr | port(2 BE) | payload`.
 
 use crate::addr::{self, Target};
 use crate::config::Config;
@@ -25,6 +30,53 @@ use tokio::sync::Mutex;
 
 pub const MAGIC_V2: &str = "sp.v2.udp-over-tcp.arpa";
 pub const MAGIC_V1: &str = "sp.udp-over-tcp.arpa";
+pub const MAGIC_PACKETADDR: &str = "sp.packet-addr.v2fly.arpa";
+
+/// Wire format of a multi-destination UDP session.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Mode {
+    /// sing-box UoT, version 1 or 2.
+    Uot(u8),
+    /// v2ray packetaddr inside VLESS UDP framing.
+    PacketAddr,
+}
+
+/// Whether a VLESS UDP target is the packetaddr magic name.
+pub fn is_packetaddr(target: &Target) -> bool {
+    matches!(target, Target::Domain(d) if d.eq_ignore_ascii_case(MAGIC_PACKETADDR))
+}
+
+/// Split a packetaddr frame into its destination and payload.
+fn parse_packetaddr(frame: &[u8]) -> std::io::Result<(Target, u16, &[u8])> {
+    let bad = || Error::new(ErrorKind::InvalidData, "bad packetaddr frame");
+    let (ip, rest): (IpAddr, &[u8]) = match frame.first() {
+        Some(0x01) if frame.len() >= 7 => {
+            let b: [u8; 4] = frame[1..5].try_into().unwrap();
+            (Ipv4Addr::from(b).into(), &frame[5..])
+        }
+        Some(0x02) if frame.len() >= 19 => {
+            let b: [u8; 16] = frame[1..17].try_into().unwrap();
+            (Ipv6Addr::from(b).into(), &frame[17..])
+        }
+        _ => return Err(bad()),
+    };
+    let port = u16::from_be_bytes([rest[0], rest[1]]);
+    Ok((Target::Ip(ip), port, &rest[2..]))
+}
+
+fn write_packetaddr(out: &mut Vec<u8>, from: SocketAddr) {
+    match from.ip() {
+        IpAddr::V4(v4) => {
+            out.push(0x01);
+            out.extend_from_slice(&v4.octets());
+        }
+        IpAddr::V6(v6) => {
+            out.push(0x02);
+            out.extend_from_slice(&v6.octets());
+        }
+    }
+    out.extend_from_slice(&from.port().to_be_bytes());
+}
 
 /// Which UoT version a requested target selects, if it is a UoT magic name.
 pub fn version_for(target: &Target) -> Option<u8> {
@@ -110,14 +162,15 @@ fn write_uot_addr(out: &mut Vec<u8>, target: &Target, port: u16) {
 }
 
 /// Serve one UoT session on an already-authenticated stream.
-pub async fn serve<S>(stream: S, version: u8, cfg: &Config, peer: SocketAddr) -> anyhow::Result<()>
+pub async fn serve<S>(stream: S, mode: Mode, cfg: &Config, peer: SocketAddr) -> anyhow::Result<()>
 where
     S: AsyncRead + AsyncWrite + Unpin,
 {
     let (mut sr, mut sw) = tokio::io::split(stream);
+    let packetaddr = mode == Mode::PacketAddr;
 
-    // Version 2 opens with a request header.
-    let connect_to = if version == 2 {
+    // UoT version 2 opens with a request header.
+    let connect_to = if mode == Mode::Uot(2) {
         let is_connect = sr.read_u8().await? != 0;
         let dest = crate::proto::read_socks_address(&mut sr).await?;
         is_connect.then_some((dest.target, dest.port))
@@ -125,7 +178,7 @@ where
         None
     };
 
-    tracing::info!(peer = %peer, proto = "uot", version, connect = ?connect_to.as_ref().map(|(t, p)| format!("{t}:{p}")), "udp session");
+    tracing::info!(peer = %peer, proto = if packetaddr { "vless-packetaddr" } else { "uot" }, ?mode, connect = ?connect_to.as_ref().map(|(t, p)| format!("{t}:{p}")), "udp session");
 
     let sock4 = UdpSocket::bind("0.0.0.0:0").await?;
     let sock6 = UdpSocket::bind("[::]:0").await.ok();
@@ -144,6 +197,39 @@ where
         let mut buf = vec![0u8; 65535];
         let mut cache: HashMap<(String, u16), SocketAddr> = HashMap::new();
         loop {
+            if packetaddr {
+                let len = match sr.read_u16().await {
+                    Ok(n) => n as usize,
+                    Err(e) if e.kind() == ErrorKind::UnexpectedEof => break,
+                    Err(e) => return Err(e),
+                };
+                sr.read_exact(&mut buf[..len]).await?;
+                act.touch();
+                let Ok((t, p, payload)) = parse_packetaddr(&buf[..len]) else {
+                    continue;
+                };
+                let dest = match udp_destination(&t, p, cfg).await {
+                    Ok(d) => d,
+                    Err(e) => {
+                        tracing::debug!(error = %e, "packetaddr packet dropped");
+                        continue;
+                    }
+                };
+                if dest.port() != p || Target::Ip(dest.ip()).to_string() != t.to_string() {
+                    let mut n = names.lock().await;
+                    if n.len() > 1024 {
+                        n.clear();
+                    }
+                    n.insert(dest, (t, p));
+                }
+                let sock = match (&dest, &sock6) {
+                    (SocketAddr::V6(_), Some(s6)) => s6,
+                    (SocketAddr::V6(_), None) => continue,
+                    _ => &sock4,
+                };
+                let _ = sock.send_to(payload, dest).await;
+                continue;
+            }
             let (dest, orig) = if let Some(d) = fixed_dest {
                 (Some(d), None)
             } else {
@@ -218,6 +304,23 @@ where
             };
             act.touch();
             let mut out = Vec::with_capacity(n + 24);
+            if packetaddr {
+                // The reply's source as the client addressed it (a DNS
+                // answer from the redirect resolver reports the server the
+                // client asked). packetaddr carries IPs only.
+                let shown = match names.lock().await.get(&from).cloned() {
+                    Some((Target::Ip(ip), p)) => SocketAddr::new(ip, p),
+                    _ => from,
+                };
+                let mut frame = Vec::with_capacity(n + 19);
+                write_packetaddr(&mut frame, shown);
+                frame.extend_from_slice(&data[..n]);
+                out.extend_from_slice(&(frame.len() as u16).to_be_bytes());
+                out.extend_from_slice(&frame);
+                sw.write_all(&out).await?;
+                sw.flush().await?;
+                continue;
+            }
             if fixed_dest.is_none() {
                 let (t, p) = names
                     .lock()
@@ -254,6 +357,24 @@ mod tests {
         assert_eq!(version_for(&Target::Domain(MAGIC_V2.into())), Some(2));
         assert_eq!(version_for(&Target::Domain(MAGIC_V1.into())), Some(1));
         assert_eq!(version_for(&Target::Domain("example.com".into())), None);
+    }
+
+    #[test]
+    fn packetaddr_roundtrip() {
+        for from in ["1.2.3.4:53", "[2606:4700::1111]:443"] {
+            let from: SocketAddr = from.parse().unwrap();
+            let mut v = Vec::new();
+            write_packetaddr(&mut v, from);
+            v.extend_from_slice(b"hi");
+            let (t, p, payload) = parse_packetaddr(&v).unwrap();
+            assert_eq!(
+                SocketAddr::new(t.to_string().trim_matches(['[', ']']).parse().unwrap(), p),
+                from
+            );
+            assert_eq!(payload, b"hi");
+        }
+        assert!(is_packetaddr(&Target::Domain(MAGIC_PACKETADDR.into())));
+        assert!(parse_packetaddr(&[0x03, 0, 0]).is_err());
     }
 
     #[tokio::test]

@@ -56,6 +56,11 @@ pub struct Config {
     #[serde(default)]
     pub decoy: Decoy,
 
+    /// Optional subscription endpoint serving every node as a Clash/mihomo,
+    /// sing-box or base64 profile. Off unless this table is present.
+    #[serde(default)]
+    pub subscription: Option<SubscriptionConfig>,
+
     /// Inbound protocol endpoints. Each binds to one secret WebSocket path.
     #[serde(default)]
     pub inbounds: Vec<Inbound>,
@@ -99,6 +104,29 @@ impl Default for UdpConfig {
             idle_timeout_secs: default_udp_idle_timeout(),
         }
     }
+}
+
+fn default_sub_name() -> String {
+    "rust-ws-relay".to_string()
+}
+
+fn default_sub_interval() -> u32 {
+    24
+}
+
+/// Subscription settings. The path is a secret: anyone who knows it gets
+/// every credential in this file.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SubscriptionConfig {
+    /// Secret HTTP path, e.g. "/sub-3k9x7q2m1v8p4z". Plain GET, no WebSocket.
+    pub path: String,
+    /// Profile name, also the prefix of each node's name.
+    #[serde(default = "default_sub_name")]
+    pub name: String,
+    /// Hours between client refreshes (the profile-update-interval header).
+    #[serde(default = "default_sub_interval")]
+    pub update_interval_hours: u32,
 }
 
 /// How to answer ordinary web requests, so the server looks like a real site.
@@ -177,6 +205,21 @@ impl Config {
             anyhow::bail!("no [[inbounds]] configured; the server would only serve the decoy");
         }
         let mut seen = std::collections::HashSet::new();
+        if let Some(sub) = &self.subscription {
+            if !sub.path.starts_with('/') || sub.path == "/" {
+                anyhow::bail!(
+                    "subscription path {:?} must start with '/' and not be '/'",
+                    sub.path
+                );
+            }
+            if sub.path.len() < 12 {
+                anyhow::bail!(
+                    "subscription path {:?} is too short to be a secret (use 12+ characters)",
+                    sub.path
+                );
+            }
+            seen.insert(sub.path.clone());
+        }
         for ib in &self.inbounds {
             if !ib.path.starts_with('/') {
                 anyhow::bail!("inbound path {:?} must start with '/'", ib.path);
@@ -185,7 +228,7 @@ impl Config {
                 anyhow::bail!("inbound path must not be '/', which is the decoy home page");
             }
             if !seen.insert(ib.path.clone()) {
-                anyhow::bail!("duplicate inbound path {:?}", ib.path);
+                anyhow::bail!("duplicate path {:?} (inbound or subscription)", ib.path);
             }
             match &ib.protocol {
                 Protocol::Vless(v) => {

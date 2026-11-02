@@ -6,7 +6,7 @@
 # Plain HTTP; TLS is terminated in front (InstaBox port URL, a CDN, Nginx...).
 listen = "0.0.0.0:3000"
 
-# Public hostname clients use. Only used by `rust-ws-relay links`.
+# Public hostname clients use, in `links` output and the subscription.
 domain = "relay.example.com"
 
 handshake_timeout_secs = 10     # time allowed to send a protocol header
@@ -20,6 +20,14 @@ enabled = true
 dns_upstream = "1.1.1.1:53"
 dns_only = false                # true = relay DNS only, refuse other UDP
 idle_timeout_secs = 60
+
+# Optional subscription URL: https://<domain><path> serves every VLESS/SS
+# inbound as a Clash/mihomo, sing-box or base64 profile (by User-Agent or
+# ?format=clash|singbox|base64). Keep the path as secret as a password.
+# [subscription]
+# path = "/sub-change-me-to-random"
+# name = "rust-ws-relay"
+# update_interval_hours = 24
 
 # The cover website for every request that isn't a valid proxy handshake.
 [decoy]

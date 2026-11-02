@@ -11,13 +11,13 @@ It's a Rust reimplementation of the idea behind [vevc/nodejs-vless](https://gith
 | Protocols | VLESS | VLESS, Shadowsocks (2022 + legacy), SOCKS5 |
 | Remote shell endpoint | optional `POST /<uuid>/run` | **removed entirely** |
 | Home page | advertises `/your-uuid` and the repo | generic decoy; never reveals a UUID, path or link |
-| Share links | served over HTTP at `/<uuid>` | printed offline by `rust-ws-relay links` |
+| Share links | served over HTTP at `/<uuid>` | printed offline by `links`; optional subscription URL (Clash/mihomo, sing-box, base64) on its own secret path |
 | Private-network access | unrestricted | blocked by default (127/8, 10/8, 192.168/16, ::1, …) |
 | Timeouts | none | handshake + idle timeouts |
 
 TCP for every protocol, plus UDP:
 
-- **VLESS UDP** (command 2): datagrams are length-framed over the WebSocket.
+- **VLESS UDP** (command 2): datagrams are length-framed over the WebSocket. The v2ray **packetaddr** encoding (mihomo and sing-box `packet-encoding: packetaddr`) carries UDP to many destinations over one VLESS stream.
 - **Shadowsocks and SOCKS5 UDP** via sing-box style **UDP-over-TCP** (UoT v1 and v2, the `sp.v2.udp-over-tcp.arpa` magic address). Turn on `udp_over_tcp` in a sing-box based client (sing-box, NekoBox, Hiddify, Karing...). Plain SS UDP and SOCKS5 UDP ASSOCIATE can't cross a WebSocket, and Xray's SS outbound doesn't send UoT over ws.
 
 Every DNS datagram (port 53) goes to `[udp] dns_upstream` (default `1.1.1.1:53`), so remote DNS works even when the client names a private resolver; replies are reported as coming from the server the client asked. Other UDP goes to the requested public destination unless `dns_only = true`. Not supported yet: VLESS mux/XUDP (command 3, which Xray uses by default for non-DNS UDP) and XTLS flows.
@@ -75,7 +75,7 @@ See [`config.example.toml`](config.example.toml). Key settings:
 | Key | Default | Meaning |
 |---|---|---|
 | `listen` | `0.0.0.0:3000` | Bind address (plain HTTP) |
-| `domain` | – | Public host, used only by `links` |
+| `domain` | – | Public host (`host` or `host:port`) used in links and the subscription |
 | `handshake_timeout_secs` | `10` | Time allowed to send a protocol header |
 | `idle_timeout_secs` | `300` | Close a connection idle in **both** directions this long (`0` = never) |
 | `block_private_addresses` | `true` | Refuse private, loopback and link-local targets (also checked after DNS) |
@@ -123,6 +123,27 @@ mode = "builtin"                 # a small generic status page (default)
 ```
 
 All responses carry `server: nginx`. Static mode rejects path traversal.
+
+## Subscription
+
+Add a `[subscription]` table and every VLESS and Shadowsocks inbound is served as one profile on a secret path:
+
+```toml
+[subscription]
+path = "/sub-3k9x7q2m1v8p4z"     # 12+ characters; anyone with it gets every credential
+name = "rust-ws-relay"           # profile name and node-name prefix
+update_interval_hours = 24
+```
+
+Subscribe to `https://<domain><path>`. The format follows the client's User-Agent, or `?format=`:
+
+| `?format=` | Auto-detected for | Contents |
+|---|---|---|
+| `clash` | Clash Meta / mihomo, Clash Verge, Stash | Full mihomo profile: VLESS (UDP via packetaddr), SS with `v2ray-plugin` + UoT v2, select and url-test groups |
+| `singbox` | sing-box, SFA / SFI / SFM | Full sing-box 1.12+ profile: TUN + mixed inbound, the same nodes, DNS over TCP through the proxy |
+| `base64` | everything else (v2rayN, v2rayNG, Shadowrocket, NekoBox) | Base64 list of share links |
+
+Hostnames come from `domain` (or the request's `Host` when unset), port 443. SOCKS5 inbounds are left out because none of these clients can dial SOCKS5 over a WebSocket. Only `GET` on the exact path answers; everything else is the decoy. `rust-ws-relay links` prints the URL.
 
 ## Clients
 
