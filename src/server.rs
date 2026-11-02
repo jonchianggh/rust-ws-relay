@@ -133,6 +133,14 @@ fn subscription(
             "txt",
         ),
     };
+    // Browsers get text/plain + inline so the profile renders on the page
+    // instead of downloading; proxy clients keep the real media type.
+    let browser = ua.starts_with("Mozilla/");
+    let ctype = if browser {
+        "text/plain; charset=utf-8"
+    } else {
+        ctype
+    };
     Response::builder()
         .header(hyper::header::CONTENT_TYPE, ctype)
         .header(hyper::header::CACHE_CONTROL, "no-store")
@@ -150,7 +158,7 @@ fn subscription(
         .header(
             hyper::header::CONTENT_DISPOSITION,
             format!(
-                "attachment; filename*=UTF-8''{}.{ext}",
+                "inline; filename*=UTF-8''{}.{ext}",
                 sub::urlencode(&sub.name)
             ),
         )
