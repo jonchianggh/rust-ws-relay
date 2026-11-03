@@ -85,6 +85,9 @@ where
     // Legacy AEAD: the address is the start of the first payload chunk(s).
     let mut plain: Vec<u8> = Vec::new();
     let request = parse_address(&mut plain, &mut reader, inner).await?;
+    // Only record the salt once the first chunk has authenticated, so an
+    // unauthenticated sender cannot fill the filter with junk.
+    replay::check_and_insert_legacy(&salt)?;
 
     let writer = SsWriter::new(method, key, &salt)?;
 
@@ -175,10 +178,15 @@ async fn read_address<R: AsyncRead + Unpin>(r: &mut R) -> std::io::Result<Reques
     super::read_socks_address(r).await
 }
 
-/// In-memory replay filter for SS-2022 salts (spec: reject a salt seen in
-/// the last 60 seconds).
+/// In-memory replay filters for client salts.
+///
+/// * SS-2022: reject a salt seen in the last 60 seconds (the spec's window;
+///   the timestamp check rejects anything older).
+/// * Legacy AEAD: there is no timestamp, so remember the most recent
+///   `LEGACY_CAPACITY` salts regardless of age, as shadowsocks-rust and
+///   shadowsocks-libev do with their salt filters.
 mod replay {
-    use std::collections::HashMap;
+    use std::collections::{HashMap, HashSet, VecDeque};
     use std::io::{Error, ErrorKind};
     use std::sync::Mutex;
     use std::time::{Duration, Instant};
@@ -200,6 +208,55 @@ mod replay {
         }
         map.insert(salt.to_vec(), now);
         Ok(())
+    }
+
+    /// About 100k salts of up to 32 bytes: a few MB at most.
+    pub const LEGACY_CAPACITY: usize = 100_000;
+
+    struct Legacy {
+        set: HashSet<Vec<u8>>,
+        order: VecDeque<Vec<u8>>,
+    }
+
+    static LEGACY: Mutex<Option<Legacy>> = Mutex::new(None);
+
+    pub fn check_and_insert_legacy(salt: &[u8]) -> std::io::Result<()> {
+        let mut g = LEGACY.lock().unwrap();
+        let f = g.get_or_insert_with(|| Legacy {
+            set: HashSet::new(),
+            order: VecDeque::new(),
+        });
+        if f.set.contains(salt) {
+            return Err(Error::new(ErrorKind::InvalidData, "SS salt replay"));
+        }
+        if f.order.len() >= LEGACY_CAPACITY {
+            if let Some(old) = f.order.pop_front() {
+                f.set.remove(&old);
+            }
+        }
+        f.set.insert(salt.to_vec());
+        f.order.push_back(salt.to_vec());
+        Ok(())
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn legacy_rejects_repeat_salt() {
+            let salt = [0x5au8; 32];
+            check_and_insert_legacy(&salt).unwrap();
+            assert!(check_and_insert_legacy(&salt).is_err());
+            check_and_insert_legacy(&[0xa5u8; 32]).unwrap();
+        }
+
+        #[test]
+        fn ss2022_rejects_repeat_salt() {
+            let salt = [0x33u8; 32];
+            check_and_insert(&salt).unwrap();
+            assert!(check_and_insert(&salt).is_err());
+        }
     }
 }
 

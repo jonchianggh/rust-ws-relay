@@ -174,7 +174,9 @@ Pushing a tag such as `v0.1.0` runs [`.github/workflows/release.yml`](.github/wo
 
 - Treat every path, UUID and key as a password. Anyone with a share link can use that inbound.
 - There is deliberately **no** remote command execution of any kind.
-- VLESS here is bare (`encryption=none`), so confidentiality comes entirely from the TLS in front of it. Never expose port 3000 directly to the internet without TLS.
+- VLESS here is bare (`encryption=none`), so confidentiality comes entirely from the TLS in front of it. Never expose port 3000 directly to the internet without TLS. Whoever terminates that TLS (a CDN or hosting gateway) can see VLESS traffic in plaintext; Shadowsocks stays encrypted end to end, so prefer SS-2022 behind an edge you don't control.
+- Shadowsocks client salts are replay-filtered: SS-2022 within its 60-second window, legacy AEAD across the most recent 100,000 sessions (the filter is in memory and resets on restart).
+- The generated sing-box profile turns on uTLS with a Chrome fingerprint for VLESS, matching `fp=chrome` in the share links and the Clash profile.
 - Use responsibly and in line with your hosting provider's terms and local law.
 
 ## License
