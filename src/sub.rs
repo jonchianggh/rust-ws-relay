@@ -238,7 +238,13 @@ pub fn singbox(cfg: &Config, ep: &Endpoint, prefix: &str) -> String {
                 "uuid": v.uuid,
                 // packetaddr: all UDP over one VLESS stream (no XUDP/mux).
                 "packet_encoding": "packetaddr",
-                "tls": { "enabled": true, "server_name": ep.host },
+                // uTLS: present a Chrome ClientHello instead of Go's own,
+                // matching fp=chrome in the links and the Clash profile.
+                "tls": {
+                    "enabled": true,
+                    "server_name": ep.host,
+                    "utls": { "enabled": true, "fingerprint": "chrome" }
+                },
                 "transport": { "type": "ws", "path": path, "headers": { "Host": ep.host } }
             }),
             Protocol::Shadowsocks(ss) => json!({
@@ -346,6 +352,13 @@ protocol = "socks5"
         assert_eq!(share_links(&c, &ep, "r").len(), 2);
         let sb: Value = serde_json::from_str(&singbox(&c, &ep, "r")).unwrap();
         assert_eq!(sb["outbounds"].as_array().unwrap().len(), 5);
+        let vless = sb["outbounds"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|o| o["type"] == "vless")
+            .unwrap();
+        assert_eq!(vless["tls"]["utls"]["fingerprint"], "chrome");
         let yml = clash(&c, &ep, "r");
         assert!(yml.contains("type: vless") && yml.contains("udp-over-tcp: true"));
         assert!(yml.contains("packet-encoding: packetaddr"));
